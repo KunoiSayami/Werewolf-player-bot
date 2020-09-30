@@ -22,7 +22,7 @@ import asyncio
 import logging
 import random
 from configparser import ConfigParser
-from typing import Dict, List
+from typing import Dict, List, Union
 
 import aioredis
 import pyrogram
@@ -53,17 +53,18 @@ class Players:
         self.BOT_LIST: List[str] = []
         self.init_message_handler()
 
-    def _set_group_listen(self, listen_to_group: int) -> None:
+    def _set_group_listen(self, listen_to_group: Union[str, int]) -> None:
         self.listen_to_group = listen_to_group
 
     @classmethod
     async def create(cls):
+        logger.info('Creating bot instance')
         self = cls(await aioredis.create_redis_pool('redis://localhost'))
         config = ConfigParser()
         config.read('config.ini')
         self._set_group_listen(config.getint('account', 'listen_to'))
         self.owner = config.getint('account', 'owner', fallback=0)
-        for _x in config.getint('account', 'count'):
+        for _x in range(config.getint('account', 'count')):
             self.client_group.append(
                 Client(f'werewolf{_x}', api_id=config.getint('account', 'api_id'),
                        api_hash=config.get('account', 'api_hash'),
@@ -76,15 +77,24 @@ class Players:
     def init_message_handler(self) -> None:
         if self.listen_to_group == 0:
             raise ValueError('listen_to_group value must be set')
-        self.client_group[0].add_handler(MessageHandler(self.handle_set_target, filters.chat(self.owner) & filters.command('target')))
-        self.client_group[0].add_handler(MessageHandler(self.handle_resend_command, filters.chat(self.owner) & filters.command('resend')))
-        self.client_group[0].add_handler(MessageHandler(self.handle_normal_resident, filters.chat(self.listen_to_group) & filters.user(self.WEREWOLF_BOT_ID) & filters.text))
-        self.client_group[0].add_handler(MessageHandler(self.handle_join_game, filters.chat(self.listen_to_group) & filters.user(self.WEREWOLF_BOT_ID)))
-        self.client_group[0].add_handler(MessageHandler(self.handle_close_autojoin, filters.chat(self.listen_to_group) & filters.command('off')))
+        self.client_group[0].add_handler(MessageHandler(self.handle_set_target,
+                                                        filters.chat(self.owner) & filters.command('target')))
+        self.client_group[0].add_handler(MessageHandler(self.handle_resend_command,
+                                                        filters.chat(self.owner) & filters.command('resend')))
+        self.client_group[0].add_handler(MessageHandler(self.handle_normal_resident,
+                                                        filters.chat(self.listen_to_group) &
+                                                        filters.user(self.WEREWOLF_BOT_ID) & filters.text))
+        self.client_group[0].add_handler(MessageHandler(self.handle_join_game,
+                                                        filters.chat(self.listen_to_group) &
+                                                        filters.user(self.WEREWOLF_BOT_ID)))
+        self.client_group[0].add_handler(MessageHandler(self.handle_close_auto_join,
+                                                        filters.chat(self.listen_to_group) & filters.command('off')))
         for x in self.client_group:
-            x.add_handler(MessageHandler(self.handle_werewolf_game, filters.chat(self.WEREWOLF_BOT_ID) & filters.incoming))
+            x.add_handler(MessageHandler(self.handle_werewolf_game,
+                                         filters.chat(self.WEREWOLF_BOT_ID) & filters.incoming))
 
     async def start(self) -> None:
+        logger.info('Starting clients')
         await asyncio.gather(*(x.start() for x in self.client_group))
         self.BOT_LIST.clear()
         self.BOT_LIST.extend(map(lambda u: str(u.id), await asyncio.gather(x.get_me() for x in self.client_group)))
@@ -96,9 +106,10 @@ class Players:
 
     async def run(self) -> None:
         await self.start()
+        logger.info('Listening game status')
         await pyrogram.idle()
 
-    async def handle_set_target(self, client: Client, msg: Message) -> None:
+    async def handle_set_target(self, _client: Client, msg: Message) -> None:
         if len(msg.command) > 1:
             if msg.command[1] == 'h':
                 self.FORCE_TARGET_HUMAN = not self.FORCE_TARGET_HUMAN
@@ -111,7 +122,7 @@ class Players:
             await msg.reply('Target cleared')
         raise ContinuePropagation
 
-    async def handle_resend_command(self, client: Client, msg: Message) -> None:
+    async def handle_resend_command(self, _client: Client, msg: Message) -> None:
         obj = await self.redis.get('admin_last_game')
         if obj is not None:
             obj = obj.decode()
@@ -120,10 +131,11 @@ class Players:
         if len(msg.command) > 1:
             await self.client_map.get(int(msg.command[1])).send_message(self.WEREWOLF_BOT_ID, f'/start {obj}')
 
-    async def handle_join_game(self, client: Client, msg: Message) -> None:
+    async def handle_join_game(self, _client: Client, msg: Message) -> None:
         self.TARGET = ''
         self.FORCE_TARGET_HUMAN = False
-        if msg.reply_markup and msg.reply_markup.inline_keyboard and msg.reply_markup.inline_keyboard[0][0].text == '加入遊戲':
+        if msg.reply_markup and msg.reply_markup.inline_keyboard and \
+                msg.reply_markup.inline_keyboard[0][0].text == '加入遊戲':
             obj = await self.redis.get('admin_last_game')
             if obj is not None:
                 obj = obj.decode()
@@ -134,18 +146,17 @@ class Players:
             if obj == link:
                 return
             await asyncio.gather(x.send_message(self.WEREWOLF_BOT_ID, f'/start {link}') for x in self.client_group)
-            # await _loop_join(link)
             logger.info('Joined the game %s', link)
             await self.redis.set('admin_last_game', link)
         raise ContinuePropagation
 
-    async def handle_normal_resident(self, client: Client, msg: Message) -> None:
+    async def handle_normal_resident(self, _client: Client, msg: Message) -> None:
         if any(x in msg.text for x in ['和事佬', '撒著閃亮的銀渣', '哼着', '村长', '捣蛋', '一聲槍聲']):
             if msg.entities[0].type == 'text_mention':
                 self.HAS_ID_CARD.extend(map(str, (x.user.id for x in msg.entities if x.user)))
         raise ContinuePropagation
 
-    async def handle_close_autojoin(self, _client: Client, msg: Message) -> None:
+    async def handle_close_auto_join(self, _client: Client, msg: Message) -> None:
         self.join_game = not self.join_game
         if self.join_game:
             _msg = await msg.reply('Started')
