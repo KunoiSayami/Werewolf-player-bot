@@ -49,12 +49,13 @@ class Players:
         self.lock: asyncio.Lock = asyncio.Lock()
         self.listen_to_group: int = 0
         self.owner: int = 0
+        self.worker_num: int = 0
         self.join_game: bool = True
         self.BOT_LIST: List[str] = []
-        self.init_message_handler()
 
     def _set_group_listen(self, listen_to_group: Union[str, int]) -> None:
-        self.listen_to_group = listen_to_group
+        self.listen_to_group = int(listen_to_group)
+        logger.debug('Sent listen group to %d', self.listen_to_group)
 
     @classmethod
     async def create(cls):
@@ -72,6 +73,8 @@ class Players:
             )
             self.client_map.update({_x: self.client_group[-1]})
         self.client_map_rev.update({v: k for k, v in self.client_map.items()})
+        self.worker_num = len(self.client_group)
+        self.init_message_handler()
         return self
 
     def init_message_handler(self) -> None:
@@ -89,6 +92,8 @@ class Players:
                                                         filters.user(self.WEREWOLF_BOT_ID)))
         self.client_group[0].add_handler(MessageHandler(self.handle_close_auto_join,
                                                         filters.chat(self.listen_to_group) & filters.command('off')))
+        self.client_group[0].add_handler(MessageHandler(self.handle_set_num_worker,
+                                                        filters.chat(self.listen_to_group) & filters.command('setw')))
         for x in self.client_group:
             x.add_handler(MessageHandler(self.handle_werewolf_game,
                                          filters.chat(self.WEREWOLF_BOT_ID) & filters.incoming))
@@ -97,7 +102,7 @@ class Players:
         logger.info('Starting clients')
         await asyncio.gather(*(x.start() for x in self.client_group))
         self.BOT_LIST.clear()
-        self.BOT_LIST.extend(map(lambda u: str(u.id), await asyncio.gather(x.get_me() for x in self.client_group)))
+        self.BOT_LIST.extend(map(lambda u: str(u.id), await asyncio.gather(*(x.get_me() for x in self.client_group))))
 
     async def stop(self) -> None:
         await asyncio.gather(*(x.stop() for x in self.client_group))
@@ -145,10 +150,23 @@ class Players:
             link = msg.reply_markup.inline_keyboard[0][0].url.split('=')[1]
             if obj == link:
                 return
-            await asyncio.gather(x.send_message(self.WEREWOLF_BOT_ID, f'/start {link}') for x in self.client_group)
+            await asyncio.gather(*(x.send_message(self.WEREWOLF_BOT_ID, f'/start {link}') for x in self.client_group))
             logger.info('Joined the game %s', link)
             await self.redis.set('admin_last_game', link)
         raise ContinuePropagation
+
+    async def handle_set_num_worker(self, _client: Client, msg: Message) -> None:
+        if len(msg.command) > 1:
+            try:
+                self.worker_num = int(msg.command[1])
+                if self.worker_num > len(self.client_group) or self.worker_num < 1:
+                    raise ValueError
+                return
+            except ValueError:
+                pass
+        await msg.reply('Please check your input')
+        await asyncio.sleep(5)
+        await msg.delete()
 
     async def handle_normal_resident(self, _client: Client, msg: Message) -> None:
         if any(x in msg.text for x in ['和事佬', '撒著閃亮的銀渣', '哼着', '村长', '捣蛋', '一聲槍聲']):
