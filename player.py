@@ -171,7 +171,9 @@ class Players:
     async def handle_normal_resident(self, _client: Client, msg: Message) -> None:
         if any(x in msg.text for x in ['和事佬', '撒著閃亮的銀渣', '哼着', '村长', '捣蛋', '一聲槍聲']):
             if msg.entities[0].type == 'text_mention':
-                self.HAS_ID_CARD.extend(map(str, (x.user.id for x in msg.entities if x.user)))
+                obj = map(str, (x.user.id for x in msg.entities if x.user))
+                self.HAS_ID_CARD.extend(obj)
+                logger.debug('Extend %s', *obj)
         raise ContinuePropagation
 
     async def handle_close_auto_join(self, _client: Client, msg: Message) -> None:
@@ -185,46 +187,58 @@ class Players:
         raise ContinuePropagation
 
     async def handle_werewolf_game(self, client: Client, msg: Message) -> None:
+        client_id: str = client.session_name[8:]
+        if msg.text:
+            logger.info('%s: %s', client.session_name[8:], msg.text)
         if isinstance(msg.reply_markup, ReplyKeyboardRemove):
             raise ContinuePropagation
+        if not (msg.reply_markup and msg.reply_markup.inline_keyboard):
+            raise ContinuePropagation
+        await asyncio.sleep(random.randint(5, 15))
         async with self.lock:
+            non_bot_button_loc: List[int] = []
+            menu_length = len(msg.reply_markup.inline_keyboard)
+            for x in range(0, menu_length):
+                if any(u in msg.reply_markup.inline_keyboard[x][0].callback_data for u in self.BOT_LIST):
+                    continue
+                non_bot_button_loc.append(x)
+            _FORCE_HUMAN = (self.FORCE_TARGET_HUMAN or not random.randint(0, 5) or
+                            (menu_length < 5 and not random.randint(0, 3)))
+            _HAS_TARGET = not self.FORCE_TARGET_HUMAN and self.TARGET != ''
+            logger.debug('%s: STATUS FORCE_HUMAN: %s, _HAS_TARGET: %s', client_id, _FORCE_HUMAN, _HAS_TARGET)
             while True:
                 try:
-                    if msg.reply_markup and msg.reply_markup.inline_keyboard:
-                        if len(msg.reply_markup.inline_keyboard) < 2:
-                            if not random.randint(0, 3):
-                                await msg.click()
-                        non_bot: List[int] = []
+                    if len(msg.reply_markup.inline_keyboard) < 2:
+                        if not random.randint(0, 3):
+                            await msg.click()
 
-                        choose_length = len(msg.reply_markup.inline_keyboard)
-                        for x in range(0, choose_length):
-                            if any(u in msg.reply_markup.inline_keyboard[x][0].callback_data for u in self.BOT_LIST):
-                                continue
-                            non_bot.append(x)
-                        fail_check = 0
-                        while True:
-                            r = random.randint(0, choose_length - 1)
-                            if msg.text and msg.text.startswith('你想處死誰') and (
-                                    self.FORCE_TARGET_HUMAN or not random.randint(0, 5) or (
-                                    choose_length < 5 and not random.randint(0, 3))):
-                                if len(non_bot):
-                                    r = random.choice(non_bot)
-                            if not self.FORCE_TARGET_HUMAN and self.TARGET != '':
-                                for x in range(0, choose_length):
-                                    if self.TARGET in msg.reply_markup.inline_keyboard[x][0].text.lower():
-                                        logger.debug('Find target %s', msg.reply_markup.inline_keyboard[x][0].callback_data)
-                                        r = x
-                                        break
-                            elif (any(
-                                    x in msg.reply_markup.inline_keyboard[r][0].callback_data for x in self.HAS_ID_CARD) and
-                                    fail_check < 2):
-                                fail_check += 1
-                                continue
-                            await msg.click(r)
-                            break
-                        logger.debug(repr(msg))
-                    if msg.text:
-                        logger.info('%d: %s', self.client_map_rev.get(client), msg.text)
+                    fail_check = 0
+                    while True:
+                        final_choose = random.randint(0, menu_length - 1)
+                        logger.debug('%s: random choose: %d', client_id, final_choose)
+                        if msg.text and msg.text.startswith('你想處死誰') and _FORCE_HUMAN:
+                            if len(non_bot_button_loc):
+                                final_choose = random.choice(non_bot_button_loc)
+                                logger.debug('%s: Redirect choose to %d', final_choose)
+                        if _HAS_TARGET:
+                            for x in range(0, menu_length):
+                                if self.TARGET in msg.reply_markup.inline_keyboard[x][0].text.lower():
+                                    logger.debug('Find target %s',
+                                                 msg.reply_markup.inline_keyboard[x][0].callback_data)
+                                    final_choose = x
+                                    break
+                        elif (len(self.HAS_ID_CARD) and any(
+                                x in msg.reply_markup.inline_keyboard[final_choose][0].callback_data for x in self.HAS_ID_CARD) and
+                                fail_check < 2):
+                            logger.debug('%s: Got HAS_ID_CARD target, Try choose target again',
+                                         client.session_name[8:])
+
+                            fail_check += 1
+                            continue
+                        logger.debug('%s: final choose: %d', client_id, final_choose)
+                        await msg.click(final_choose)
+                        break
+                    logger.debug(repr(msg))
                     break
                 except TimeoutError:
                     pass
