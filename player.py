@@ -29,6 +29,7 @@ import pyrogram
 from pyrogram import Client, ContinuePropagation, filters
 from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message, ReplyKeyboardRemove
+from pyrogram.errors import MessageIdInvalid
 
 logger = logging.getLogger('Werewolf_bot')
 logger.setLevel(logging.INFO)
@@ -41,7 +42,7 @@ class Players:
     def __init__(self, redis: aioredis.Redis):
         self.client_group: List[Client] = []
         self.client_map: Dict[int, Client] = {}
-        self.client_map_rev: Dict[Client, int] = {}
+        # self.client_map_rev: Dict[Client, int] = {}
         self.redis = redis
         self.TARGET: str = ''
         self.FORCE_TARGET_HUMAN: bool = False
@@ -72,7 +73,7 @@ class Players:
                        app_version='werewolf')
             )
             self.client_map.update({_x: self.client_group[-1]})
-        self.client_map_rev.update({v: k for k, v in self.client_map.items()})
+        # self.client_map_rev.update({v: k for k, v in self.client_map.items()})
         self.worker_num = len(self.client_group)
         self.init_message_handler()
         return self
@@ -169,11 +170,11 @@ class Players:
         await msg.delete()
 
     async def handle_normal_resident(self, _client: Client, msg: Message) -> None:
-        if any(x in msg.text for x in ['和事佬', '撒著閃亮的銀渣', '哼着', '村长', '捣蛋', '一聲槍聲']):
+        if any(x in msg.text for x in ['和事佬', '撒著閃亮的銀渣', '哼着', '回到家中哼起', '村长', '捣蛋', '一聲槍聲']):
             if msg.entities[0].type == 'text_mention':
                 obj = map(str, (x.user.id for x in msg.entities if x.user))
                 self.HAS_ID_CARD.extend(obj)
-                logger.debug('Extend %s', *obj)
+                logger.debug('Extend %s', str(*obj))
         raise ContinuePropagation
 
     async def handle_close_auto_join(self, _client: Client, msg: Message) -> None:
@@ -236,7 +237,12 @@ class Players:
                             fail_check += 1
                             continue
                         logger.debug('%s: final choose: %d', client_id, final_choose)
-                        await msg.click(final_choose)
+                        for retries in range(1, 4):
+                            try:
+                                await msg.click(final_choose)
+                                break
+                            except MessageIdInvalid:
+                                logger.error('%s: Got MessageIdInvalid (retries: %d)', client_id, retries)
                         break
                     logger.debug(repr(msg))
                     break
