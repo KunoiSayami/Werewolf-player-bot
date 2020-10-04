@@ -19,11 +19,12 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 import asyncio
+import concurrent.futures
 import logging
 import random
 import sys
 from configparser import ConfigParser
-from typing import List, Union
+from typing import List, Optional, Union
 
 import aioredis
 import pyrogram
@@ -34,6 +35,47 @@ from pyrogram.errors import MessageIdInvalid
 
 logger = logging.getLogger('Werewolf_bot')
 logger.setLevel(logging.INFO)
+
+
+class JoinGameTracker:
+    def __init__(self, client: Client, key: str):
+        self.client = client
+        self.key = key
+        self.future: Optional[concurrent.futures.Future] = None
+        self.handler = MessageHandler(self.message_handler,
+                                      filters.chat(Players.WEREWOLF_BOT_ID) & filters.text)
+
+    def cancel(self) -> None:
+        if self.future is not None:
+            self.future.cancel()
+            self.future = None
+            self.client.remove_handler(self.handler, -1)
+            logger.debug('%s: Canceled!', self.client.session_name[8:])
+
+    async def _send(self) -> None:
+        logger.debug('%s: Started!', self.client.session_name[8:])
+        self.client.add_handler(self.handler, -1)
+        for x in range(3):
+            await self.client.send_message(Players.WEREWOLF_BOT_ID, f'/start {self.key}')
+            await asyncio.sleep(10)
+
+    def create_task(self) -> None:
+        if self.future is None:
+            self.future = asyncio.create_task(self._send())
+
+    async def wait(self) -> None:
+        if self.future is not None:
+            await asyncio.wait((self.future,))
+
+    async def message_handler(self, _client: Client, msg: Message) -> None:
+        if '你已加入' in msg.text and '的遊戲中' in msg.text:
+            self.cancel()
+
+    @classmethod
+    def create(cls, client: Client, key: str) -> 'JoinGameTracker':
+        self = cls(client, key)
+        self.create_task()
+        return self
 
 
 class Players:
@@ -138,7 +180,7 @@ class Players:
             return
         if len(msg.command) > 1:
             for client in self.client_group:
-                if client.session_name.endswith(msg.command[1]):
+                if client.session_name[8:] == msg.command[1]:
                     await client.send_message(self.WEREWOLF_BOT_ID, f'/start {obj}')
 
     async def handle_toggle_debug_command(self, _client: Client, msg: Message) -> None:
@@ -159,8 +201,9 @@ class Players:
             link = msg.reply_markup.inline_keyboard[0][0].url.split('=')[1]
             if obj == link:
                 return
-            await asyncio.gather(*(x.send_message(self.WEREWOLF_BOT_ID, f'/start {link}') for x in self.client_group))
+            waiter = asyncio.gather(*(JoinGameTracker.create(x, link).wait() for x in self.client_group))
             logger.info('Joined the game %s', link)
+            await waiter
             await self.redis.set(self.redis_key, link)
         raise ContinuePropagation
 
@@ -181,7 +224,7 @@ class Players:
         if any(x in msg.text for x in ['和事佬', '銀渣', '哼着', '回到家中哼起', '出示了來自官方', '捣蛋', '一聲槍聲']):
             logger.debug(repr(msg))
             for x in msg.entities:
-                if x.type == 'text_mention':
+                if x.type == 'text_mention' and str(x.user.id) not in self.HAS_ID_CARD:
                     logger.debug('Insert %d to HAS_ID_CARD array', x.user.id)
                     self.HAS_ID_CARD.append(str(x.user.id))
         raise ContinuePropagation
