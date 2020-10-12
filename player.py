@@ -203,15 +203,17 @@ class Players:
                 return
             waiter = asyncio.gather(*(JoinGameTracker.create(x, link).wait() for x in self.client_group))
             logger.info('Joined the game %s', link)
-            await waiter
             await self.redis.set(self.redis_key, link)
+            await waiter
         raise ContinuePropagation
 
     async def handle_set_num_worker(self, _client: Client, msg: Message) -> None:
         if len(msg.command) > 1:
             try:
+                _value = self.worker_num
                 self.worker_num = int(msg.command[1])
                 if self.worker_num > len(self.client_group) or self.worker_num < 1:
+                    self.worker_num = _value
                     raise ValueError
                 return
             except ValueError:
