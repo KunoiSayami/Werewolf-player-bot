@@ -24,7 +24,7 @@ import logging
 import random
 import sys
 from configparser import ConfigParser
-from typing import List, Optional, Union
+from typing import Coroutine, List, Optional, Union
 
 import aioredis
 import pyrogram
@@ -143,14 +143,39 @@ class Players:
                                          filters.chat(self.WEREWOLF_BOT_ID) & filters.incoming))
         logger.debug('Current workers: %d', self.worker_num)
 
+    @staticmethod
+    async def safe_start_or_stop(client: Client, method: Coroutine) -> Optional[str]:
+        try:
+            await method
+            return None
+        except pyrogram.errors.UserDeactivated:
+            logger.critical('Client is deactivated, please re-login: %s', client.session_name)
+            return client.session_name
+        except pyrogram.errors.UserDeactivatedBan:
+            logger.critical('Client is deactivated and got banned, please re-login: %s', client.session_name)
+            return client.session_name
+
     async def start(self) -> None:
         logger.info('Starting clients')
-        await asyncio.gather(*(x.start() for x in self.client_group))
+        results = await asyncio.gather(*(self.safe_start_or_stop(x, x.start()) for x in self.client_group))
+
+        fail_count = 0
+        for result in results:
+            if result is not None:
+                for client in self.client_group:
+                    if result == client.session_name:
+                        self.client_group.remove(client)
+                        fail_count += 1
+                        break
+        if fail_count > 0:
+            self.worker_num = len(self.client_group)
+            logger.warning("Found %d client(s) couldn't start, resize worker num to %d", fail_count, self.worker_num)
+
         self.BOT_LIST.clear()
         self.BOT_LIST.extend(map(lambda u: str(u.id), await asyncio.gather(*(x.get_me() for x in self.client_group))))
 
     async def stop(self) -> None:
-        await asyncio.gather(*(x.stop() for x in self.client_group))
+        await asyncio.gather(*(self.safe_start_or_stop(x, x.stop()) for x in self.client_group))
         self.redis.close()
         await self.redis.wait_closed()
 
@@ -201,7 +226,8 @@ class Players:
             link = msg.reply_markup.inline_keyboard[0][0].url.split('=')[1]
             if obj == link:
                 return
-            waiter = asyncio.gather(*(JoinGameTracker.create(x, link).wait() for x in self.client_group))
+            waiter = asyncio.gather(*(JoinGameTracker.create(self.client_group[x], link).wait()
+                                      for x in range(self.worker_num)))
             logger.info('Joined the game %s', link)
             await self.redis.set(self.redis_key, link)
             await waiter
