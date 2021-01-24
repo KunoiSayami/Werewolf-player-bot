@@ -28,7 +28,7 @@ import sys
 import warnings
 from configparser import ConfigParser
 from dataclasses import dataclass
-from typing import Coroutine, List, Optional
+from typing import Coroutine, Optional
 
 import aioredis
 import pyrogram
@@ -76,7 +76,7 @@ class JoinGameTracker:
     async def message_handler(self, _client: Client, msg: Message) -> None:
         if '你已加入' in msg.text and '的遊戲中' in msg.text:
             self.cancel()
-        if 'You are already in a game!' in msg.text:
+        elif 'You are already in a game!' in msg.text:
             logger.info('%s, Canceled', msg.text)
             self.cancel()
 
@@ -124,11 +124,10 @@ class Players:
         self.lock: asyncio.Lock = asyncio.Lock()
         self._listen_to_group: list[int] = [0]
         self.owner: int = 0
-        self.join_game: bool = True
         self.BOT_LIST: list[str] = []
         self.redis_key_suffix: str = 'werewolf_bot'
         self.game_configs: dict[int, GameConfig] = {}
-        self.game_identify_mapping: dict[str, int] = {}
+        self.game_identification_mapping: dict[str, int] = {}
 
     @property
     def listen_to_group(self) -> list[int]:
@@ -261,12 +260,12 @@ class Players:
         await msg.delete()
 
     async def handle_join_game(self, _client: Client, msg: Message) -> None:
+        instance = self.game_configs[msg.chat.id]
         self.TARGET = ''
         self.FORCE_TARGET_HUMAN = False
         if msg.reply_markup and msg.reply_markup.inline_keyboard and \
                 (any(msg.reply_markup.inline_keyboard[0][0].text == x for x in ['加入遊戲', 'Join'])):
             obj = await self.redis.get(f'{self.redis_key_suffix}_{msg.chat.id}')
-            instance = self.game_configs[msg.chat.id]
             if obj is not None:
                 obj = obj.decode()
                 if not instance.enabled:
@@ -275,6 +274,8 @@ class Players:
             link = msg.reply_markup.inline_keyboard[0][0].url.split('=')[1]
             if obj == link:
                 return
+            if instance.group_join_string in self.game_identification_mapping:
+                self.game_identification_mapping.pop(instance.group_join_string)
             instance.group_join_string = link
             waiter = asyncio.gather(*(JoinGameTracker.create(self.client_group[x], link).wait()
                                       for x in range(self.game_configs[msg.chat.id].worker_num)))
@@ -308,8 +309,9 @@ class Players:
         raise ContinuePropagation
 
     async def handle_close_auto_join(self, _client: Client, msg: Message) -> None:
-        self.join_game = not self.join_game
-        if self.join_game:
+        instance = self.game_configs[msg.chat.id]
+        instance.enabled = not instance.enabled
+        if instance.enabled:
             _msg = await msg.reply('Started')
         else:
             _msg = await msg.reply('Stopped')
@@ -329,15 +331,16 @@ class Players:
             raise ContinuePropagation
         await asyncio.sleep(random.randint(5, 15))
         async with self.lock:
-            # Get group id from inline keyboard
+            # Get group identification string from inline keyboard callback data
             group_id_str = msg.reply_markup.inline_keyboard[0][0].callback_data.split('|')[2]
-            if not (group_id := self.game_identify_mapping.get(group_id_str)):
+            if not (group_id := self.game_identification_mapping.get(group_id_str)):
                 for group_id, config in self.game_configs.items():
                     if group_id_str in config.group_join_string:
-                        self.game_identify_mapping.update({group_id_str: group_id})
+                        self.game_identification_mapping.update({group_id_str: group_id})
+                        config.group_join_string = group_id_str
                         break
 
-            non_bot_button_loc: List[int] = []
+            non_bot_button_loc: list[int] = []
             menu_length = len(msg.reply_markup.inline_keyboard)
             for x in range(0, menu_length):
                 if any(u in msg.reply_markup.inline_keyboard[x][0].callback_data for u in self.BOT_LIST):
