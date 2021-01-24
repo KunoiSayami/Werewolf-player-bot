@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # player.py
-# Copyright (C) 2020 KunoiSayami
+# Copyright (C) 2020-2021 KunoiSayami
 #
 # This module is part of Werewolf-player-bot and is released under
 # the AGPL v3 License: https://www.gnu.org/licenses/agpl-3.0.txt
@@ -18,13 +18,17 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
+from __future__ import annotations
+import ast
 import asyncio
 import concurrent.futures
 import logging
 import random
 import sys
+import warnings
 from configparser import ConfigParser
-from typing import Coroutine, List, Optional, Union
+from dataclasses import dataclass
+from typing import Coroutine, List, Optional
 
 import aioredis
 import pyrogram
@@ -34,6 +38,8 @@ from pyrogram.types import Message, ReplyKeyboardRemove
 from pyrogram.errors import MessageIdInvalid
 
 logger = logging.getLogger('Werewolf_bot')
+logger.setLevel(logging.INFO)
+logger_detail = logger.getChild('detail')
 logger.setLevel(logging.INFO)
 
 
@@ -70,12 +76,40 @@ class JoinGameTracker:
     async def message_handler(self, _client: Client, msg: Message) -> None:
         if '你已加入' in msg.text and '的遊戲中' in msg.text:
             self.cancel()
+        if 'You are already in a game!' in msg.text:
+            logger.info('%s, Canceled', msg.text)
+            self.cancel()
 
     @classmethod
-    def create(cls, client: Client, key: str) -> 'JoinGameTracker':
+    def create(cls, client: Client, key: str) -> JoinGameTracker:
         self = cls(client, key)
         self.create_task()
         return self
+
+
+@dataclass(init=False)
+class GameConfig:
+    enabled: bool
+    worker_num: int
+    id_cards: list[str]
+    _default_worker_num: int
+    group_join_string: str
+
+    def __init__(self, enabled: bool, worker_num: int):
+        self.enabled = enabled
+        self.worker_num = worker_num
+        self.id_cards = []
+        self._default_worker_num = worker_num
+        self.group_join_string = ''
+
+    def clear_id_cards(self) -> None:
+        self.id_cards.clear()
+
+    def reset(self) -> None:
+        self.enabled = True
+        self.worker_num = self._default_worker_num
+        self.group_join_string = ''
+        self.clear_id_cards()
 
 
 class Players:
@@ -83,30 +117,39 @@ class Players:
     WEREWOLF_BOT_ID: int = 175844556
 
     def __init__(self, redis: aioredis.Redis):
-        self.client_group: List[Client] = []
+        self.client_group: list[Client] = []
         self.redis = redis
         self.TARGET: str = ''
         self.FORCE_TARGET_HUMAN: bool = False
-        self.HAS_ID_CARD: List[str] = []
         self.lock: asyncio.Lock = asyncio.Lock()
-        self.listen_to_group: int = 0
+        self._listen_to_group: list[int] = [0]
         self.owner: int = 0
-        self.worker_num: int = 0
         self.join_game: bool = True
-        self.BOT_LIST: List[str] = []
-        self.redis_key: str = 'werewolf_bot'
+        self.BOT_LIST: list[str] = []
+        self.redis_key_suffix: str = 'werewolf_bot'
+        self.game_configs: dict[int, GameConfig] = {}
+        self.game_identify_mapping: dict[str, int] = {}
 
-    def _set_group_listen(self, listen_to_group: Union[str, int]) -> None:
-        self.listen_to_group = int(listen_to_group)
-        logger.debug('Set listen group to %d', self.listen_to_group)
+    @property
+    def listen_to_group(self) -> list[int]:
+        return self._listen_to_group
+
+    @listen_to_group.setter
+    def listen_to_group(self, value: list[int]) -> None:
+        if isinstance(value, int):
+            value = [value]
+            warnings.warn('Passing int value to set listen group is deprecated since version 2.0.0',
+                          DeprecationWarning, 2)
+        self._listen_to_group = value
+        logger.debug('Set listen group to %s', str(self.listen_to_group))
 
     @classmethod
-    async def create(cls):
+    async def create(cls) -> Players:
         logger.info('Creating bot instance')
         self = cls(await aioredis.create_redis_pool('redis://localhost'))
         config = ConfigParser()
         config.read('config.ini')
-        self._set_group_listen(config.getint('account', 'listen_to'))
+        self.listen_to_group = ast.literal_eval(config.get('account', 'listen_to'))
         self.owner = config.getint('account', 'owner', fallback=0)
         for _x in range(config.getint('account', 'count')):
             self.client_group.append(
@@ -114,45 +157,46 @@ class Players:
                        api_hash=config.get('account', 'api_hash'),
                        app_version='werewolf')
             )
-        self.worker_num = len(self.client_group)
-        self.redis_key = config.get('account', 'redis_key', fallback='werewolf_bot')
+        worker_num = len(self.client_group)
+        for group in self.listen_to_group:
+            self.game_configs.update({group: GameConfig(True, worker_num)})
+        self.redis_key_suffix = config.get('account', 'redis_key_suffix', fallback='werewolf_bot')
         self.init_message_handler()
         return self
 
     def init_message_handler(self) -> None:
-        if self.listen_to_group == 0:
+        if self._listen_to_group[0] == 0:
             raise ValueError('listen_to_group value must be set')
         self.client_group[0].add_handler(MessageHandler(self.handle_set_target,
                                                         filters.chat(self.owner) & filters.command('target')))
-        self.client_group[0].add_handler(MessageHandler(self.handle_resend_command,
-                                                        filters.chat(self.owner) & filters.command('resend')))
+        self.client_group[0].add_handler(
+            MessageHandler(self.handle_resend_command,
+                           filters.user(self.owner) & filters.chat(self._listen_to_group) & filters.command('resend')))
         self.client_group[0].add_handler(MessageHandler(self.handle_toggle_debug_command,
                                                         filters.chat(self.owner) & filters.command('debug')))
         self.client_group[0].add_handler(MessageHandler(self.handle_normal_resident,
-                                                        filters.chat(self.listen_to_group) &
+                                                        filters.chat(self._listen_to_group) &
                                                         filters.user(self.WEREWOLF_BOT_ID) & filters.text))
         self.client_group[0].add_handler(MessageHandler(self.handle_join_game,
-                                                        filters.chat(self.listen_to_group) &
+                                                        filters.chat(self._listen_to_group) &
                                                         filters.user(self.WEREWOLF_BOT_ID)))
         self.client_group[0].add_handler(MessageHandler(self.handle_close_auto_join,
-                                                        filters.chat(self.listen_to_group) & filters.command('off')))
+                                                        filters.chat(self._listen_to_group) & filters.command('off')))
         self.client_group[0].add_handler(MessageHandler(self.handle_set_num_worker,
-                                                        filters.chat(self.listen_to_group) & filters.command('setw')))
+                                                        filters.chat(self._listen_to_group) & filters.command('setw')))
         for x in self.client_group:
             x.add_handler(MessageHandler(self.handle_werewolf_game,
                                          filters.chat(self.WEREWOLF_BOT_ID) & filters.incoming))
-        logger.debug('Current workers: %d', self.worker_num)
+        logger.debug('Current workers: %d', len(self.client_group))
 
     @staticmethod
     async def safe_start_or_stop(client: Client, method: Coroutine) -> Optional[str]:
         try:
             await method
-            return None
-        except pyrogram.errors.UserDeactivated:
-            logger.critical('Client is deactivated, please re-login: %s', client.session_name)
-            return client.session_name
-        except pyrogram.errors.UserDeactivatedBan:
-            logger.critical('Client is deactivated and got banned, please re-login: %s', client.session_name)
+        except (pyrogram.errors.UserDeactivated, pyrogram.errors.UserDeactivatedBan) as e:
+            logger.critical('Client is deactivated%s, please re-login: %s',
+                            ' and got banned' if isinstance(e, pyrogram.errors.UserDeactivatedBan) else '',
+                            client.session_name)
             return client.session_name
 
     async def start(self) -> None:
@@ -168,8 +212,10 @@ class Players:
                         fail_count += 1
                         break
         if fail_count > 0:
-            self.worker_num = len(self.client_group)
-            logger.warning("Found %d client(s) couldn't start, resize worker num to %d", fail_count, self.worker_num)
+            for group_id, config in self.game_configs.items():
+                config.worker_num = len(self.client_group)
+            logger.warning("Found %d client(s) couldn't start, resize worker num to %d",
+                           fail_count, len(self.client_group))
 
         self.BOT_LIST.clear()
         self.BOT_LIST.extend(map(lambda u: str(u.id), await asyncio.gather(*(x.get_me() for x in self.client_group))))
@@ -198,7 +244,7 @@ class Players:
         raise ContinuePropagation
 
     async def handle_resend_command(self, _client: Client, msg: Message) -> None:
-        obj = await self.redis.get(self.redis_key)
+        obj = await self.redis.get(f'{self.redis_key_suffix}_{msg.chat.id}')
         if obj is not None:
             obj = obj.decode()
         else:
@@ -210,51 +256,55 @@ class Players:
 
     async def handle_toggle_debug_command(self, _client: Client, msg: Message) -> None:
         logger.setLevel(logging.INFO if logger.level == logging.DEBUG else logging.DEBUG)
-        await msg.reply(f'Set level to {"DEBUG" if logger.level == logging.DEBUG else "INFO"}')
+        msg = await msg.reply(f'Set level to {"DEBUG" if logger.level == logging.DEBUG else "INFO"}')
+        await asyncio.sleep(5)
+        await msg.delete()
 
     async def handle_join_game(self, _client: Client, msg: Message) -> None:
         self.TARGET = ''
         self.FORCE_TARGET_HUMAN = False
         if msg.reply_markup and msg.reply_markup.inline_keyboard and \
-                msg.reply_markup.inline_keyboard[0][0].text == '加入遊戲':
-            obj = await self.redis.get(self.redis_key)
+                (any(msg.reply_markup.inline_keyboard[0][0].text == x for x in ['加入遊戲', 'Join'])):
+            obj = await self.redis.get(f'{self.redis_key_suffix}_{msg.chat.id}')
+            instance = self.game_configs[msg.chat.id]
             if obj is not None:
                 obj = obj.decode()
-                if not self.join_game:
+                if not instance.enabled:
                     return
-            self.HAS_ID_CARD.clear()
+            instance.clear_id_cards()
             link = msg.reply_markup.inline_keyboard[0][0].url.split('=')[1]
             if obj == link:
                 return
+            instance.group_join_string = link
             waiter = asyncio.gather(*(JoinGameTracker.create(self.client_group[x], link).wait()
-                                      for x in range(self.worker_num)))
+                                      for x in range(self.game_configs[msg.chat.id].worker_num)))
             logger.info('Joined the game %s', link)
-            await self.redis.set(self.redis_key, link)
+            await self.redis.set(f'{self.redis_key_suffix}_{msg.chat.id}', link)
             await waiter
         raise ContinuePropagation
 
     async def handle_set_num_worker(self, _client: Client, msg: Message) -> None:
         if len(msg.command) > 1:
             try:
-                _value = self.worker_num
-                self.worker_num = int(msg.command[1])
-                if self.worker_num > len(self.client_group) or self.worker_num < 1:
-                    self.worker_num = _value
+                worker_num = int(msg.command[1])
+                if worker_num > len(self.client_group) or worker_num < 1:
                     raise ValueError
+                self.game_configs[msg.chat.id].worker_num = worker_num
                 return
             except ValueError:
                 pass
-        await msg.reply('Please check your input')
+        msg = await msg.reply('Please check your input')
         await asyncio.sleep(5)
         await msg.delete()
 
     async def handle_normal_resident(self, _client: Client, msg: Message) -> None:
         if any(x in msg.text for x in ['和事佬', '銀渣', '哼着', '回到家中哼起', '出示了來自官方', '捣蛋', '一聲槍聲']):
             logger.debug(repr(msg))
+            instance = self.game_configs[msg.chat.id].id_cards
             for x in msg.entities:
-                if x.type == 'text_mention' and str(x.user.id) not in self.HAS_ID_CARD:
+                if x.type == 'text_mention' and str(x.user.id) not in instance:
                     logger.debug('Insert %d to HAS_ID_CARD array', x.user.id)
-                    self.HAS_ID_CARD.append(str(x.user.id))
+                    instance.append(str(x.user.id))
         raise ContinuePropagation
 
     async def handle_close_auto_join(self, _client: Client, msg: Message) -> None:
@@ -279,6 +329,14 @@ class Players:
             raise ContinuePropagation
         await asyncio.sleep(random.randint(5, 15))
         async with self.lock:
+            # Get group id from inline keyboard
+            group_id_str = msg.reply_markup.inline_keyboard[0][0].callback_data.split('|')[2]
+            if not (group_id := self.game_identify_mapping.get(group_id_str)):
+                for group_id, config in self.game_configs.items():
+                    if group_id_str in config.group_join_string:
+                        self.game_identify_mapping.update({group_id_str: group_id})
+                        break
+
             non_bot_button_loc: List[int] = []
             menu_length = len(msg.reply_markup.inline_keyboard)
             for x in range(0, menu_length):
@@ -289,6 +347,9 @@ class Players:
                             (menu_length < 4 and not random.randint(0, 6)))
             _HAS_TARGET = not self.FORCE_TARGET_HUMAN and self.TARGET != ''
             logger.debug('%s: STATUS FORCE_HUMAN: %s, _HAS_TARGET: %s', client_id, _FORCE_HUMAN, _HAS_TARGET)
+            if msg.reply_markup:
+                logger_detail.debug('%s', repr(msg.reply_markup))
+            group_id_card_instance = self.game_configs[group_id].id_cards
             while True:
                 try:
                     if len(msg.reply_markup.inline_keyboard) < 2:
@@ -310,9 +371,9 @@ class Players:
                                                  msg.reply_markup.inline_keyboard[x][0].callback_data)
                                     final_choose = x
                                     break
-                        elif (len(self.HAS_ID_CARD) and any(
+                        elif (len(group_id_card_instance) and any(
                                 x in msg.reply_markup.inline_keyboard[final_choose][0].callback_data
-                                for x in self.HAS_ID_CARD) and fail_check < 2):
+                                for x in group_id_card_instance) and fail_check < 2):
                             logger.debug('%s: Got HAS_ID_CARD target, Try choose target again',
                                          client.session_name[8:])
 
@@ -347,8 +408,11 @@ if __name__ == '__main__':
         logging.basicConfig(level=logging.DEBUG,
                             format='%(asctime)s - %(levelname)s - %(funcName)s - %(lineno)d - %(message)s')
 
-    if len(sys.argv) > 1 and sys.argv[1] == '--debug':
+    if '--debug' in sys.argv:
         logger.setLevel(logging.DEBUG)
         logger.info('Program is running under debug mode')
+    if '--detail' in sys.argv:
+        logger_detail.setLevel(logging.DEBUG)
+        logger_detail.info('Program will show more detail information')
     logging.getLogger('pyrogram').setLevel(logging.WARNING)
     asyncio.get_event_loop().run_until_complete(main())
