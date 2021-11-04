@@ -1,7 +1,5 @@
 # Werewolf player bot
 
-## DUE TO MY ACCOUNT GOT TELEGRAM BANNED, THIS PROJECT IS NO LONGER MAINTENANCE
-
 ## License
 
 [![](https://www.gnu.org/graphics/agplv3-155x51.png)](https://www.gnu.org/licenses/agpl-3.0.txt)

@@ -145,7 +145,7 @@ class Players:
     @classmethod
     async def create(cls) -> Players:
         logger.info('Creating bot instance')
-        self = cls(await aioredis.create_redis_pool('redis://localhost'))
+        self = cls(await aioredis.from_url('redis://localhost'))
         config = ConfigParser()
         config.read('config.ini')
         self.listen_to_group = ast.literal_eval(config.get('account', 'listen_to'))
@@ -221,8 +221,7 @@ class Players:
 
     async def stop(self) -> None:
         await asyncio.gather(*(self.safe_start_or_stop(x, x.stop()) for x in self.client_group))
-        self.redis.close()
-        await self.redis.wait_closed()
+        await self.redis.close()
 
     async def run(self) -> None:
         await self.start()
