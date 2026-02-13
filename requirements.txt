@@ -1,2 +1,2 @@
-aioredis~=2.0.0
-Pyrogram~=1.2.9
+redis~=7.1.0
+Kurigram~=2.2.18

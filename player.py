@@ -57,10 +57,10 @@ class JoinGameTracker:
             self.future.cancel()
             self.future = None
             self.client.remove_handler(self.handler, -1)
-            logger.debug("%s: Canceled!", self.client.session_name[8:])
+            logger.debug("%s: Canceled!", self.client.name)
 
     async def _send(self) -> None:
-        logger.debug("%s: Started!", self.client.session_name[8:])
+        logger.debug("%s: Started!", self.client.name)
         self.client.add_handler(self.handler, -1)
         for x in range(3):
             await self.client.send_message(
@@ -248,9 +248,9 @@ class Players:
                     if isinstance(e, pyrogram.errors.UserDeactivatedBan)
                     else ""
                 ),
-                client.session_name,
+                client.name,
             )
-            return client.session_name
+            return client.name
 
     async def start(self) -> None:
         logger.info("Starting clients")
@@ -262,7 +262,7 @@ class Players:
         for result in results:
             if result is not None:
                 for client in self.client_group:
-                    if result == client.session_name:
+                    if result == client.name:
                         self.client_group.remove(client)
                         fail_count += 1
                         break
@@ -315,7 +315,7 @@ class Players:
             return
         if len(msg.command) > 1:
             for client in self.client_group:
-                if client.session_name[8:] == msg.command[1]:
+                if client.name == msg.command[1]:
                     await client.send_message(self.WEREWOLF_BOT_ID, f"/start {obj}")
 
     async def handle_toggle_debug_command(self, _client: Client, msg: Message) -> None:
@@ -412,11 +412,11 @@ class Players:
         raise ContinuePropagation
 
     async def handle_werewolf_game(self, client: Client, msg: Message) -> None:
-        client_id: str = client.session_name[8:]
+        client_id: str = client.name
         if msg.text:
-            logger.info("%s: %s", client.session_name[8:], msg.text)
+            logger.info("%s: %s", client.name, msg.text)
         if msg.caption:
-            logger.info("%s: %s", client.session_name[8:], msg.caption)
+            logger.info("%s: %s", client.name, msg.caption)
         if isinstance(msg.reply_markup, ReplyKeyboardRemove):
             raise ContinuePropagation
         if not (msg.reply_markup and msg.reply_markup.inline_keyboard):
@@ -509,7 +509,7 @@ class Players:
                         ):
                             logger.debug(
                                 "%s: Got HAS_ID_CARD target, Try choose target again",
-                                client.session_name[8:],
+                                client.name,
                             )
 
                             fail_check += 1
